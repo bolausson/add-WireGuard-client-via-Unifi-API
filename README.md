@@ -4,6 +4,10 @@ Add a WireGuard client to a Unifi Wireguard-Server using the API
 With the help of some network logging and some LLM support,
 I was able to instrument the Unifi proxy/network/v2/api to manage the WireGurad clients.
 
+This script was tested against a Unifi UDM SE running:
+* UnifiOS: 5.0.4
+* Network: 10.0.152
+
 The script can:
 * list users
 * add users
