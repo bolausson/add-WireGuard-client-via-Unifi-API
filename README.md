@@ -63,7 +63,7 @@ DNS = 10.0.0.116, 10.0.0.254
 
 [Peer]
 PublicKey = +CXSNgCRLRTvSaKYW7JzpS4Nzg9s0n0bw7ceC8FzFXo=
-Endpoint = udmse.ddnss.de:51824
+Endpoint = your.domain.de:51824
 AllowedIPs = 192.168.7.0/24, 10.0.0.0/22
 PersistentKeepalive = 25
 ```
