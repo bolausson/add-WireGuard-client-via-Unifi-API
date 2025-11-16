@@ -25,7 +25,6 @@
 # This Python 3 program is intended to manage WireGuard users via the Unifi API
 #
 
-#!/usr/bin/env python3
 import sys
 import json
 import argparse
@@ -69,6 +68,7 @@ SECTION = "unifi"
 VERBOSE = False   # set by -v/--verbose
 COLORIZE = True   # set false by -nc/--no-color
 QUIET = False     # set by -q/--quiet
+ORIGINAL_STDOUT = sys.stdout  # will be set again in main()
 
 # ANSI colors (light blue for requests, light green for responses)
 C_REQ = "\033[96m"
@@ -82,6 +82,11 @@ def colorize(s: str, color: str) -> str:
 
 def vprint(*args, **kwargs):
     if VERBOSE:
+        print(*args, **kwargs)
+
+def qprint(*args, **kwargs):
+    """Print only when not in quiet mode."""
+    if not QUIET:
         print(*args, **kwargs)
 
 def sanitize_headers(headers: Dict[str, str]) -> Dict[str, str]:
@@ -642,58 +647,99 @@ def is_duplicate_username(existing_users: List[Dict[str, Any]], candidate: str) 
     cand = (candidate or "").strip().lower()
     return any((u.get("name") or "").strip().lower() == cand for u in existing_users)
 
+def prompt_input_with_stderr(prompt_text: str) -> str:
+    """Show a prompt in quiet mode by writing to stderr; otherwise use input(prompt)."""
+    if QUIET:
+        sys.stderr.write(prompt_text)
+        sys.stderr.flush()
+        return input().strip()
+    else:
+        return input(prompt_text).strip()
+
 def prompt_unique_username(existing_users: List[Dict[str, Any]], initial: Optional[str]) -> str:
+    """
+    Prompt until a non-empty, non-duplicate username is provided.
+    In quiet mode:
+      - Do NOT print tables or chatter
+      - Only show the prompt (on stderr) even when duplicate is found
+    """
     name = (initial or "").strip()
     while True:
         if not name:
-            name = input("Enter new WireGuard username: ").strip()
+            name = prompt_input_with_stderr("Enter new WireGuard username: ")
             continue
         if is_duplicate_username(existing_users, name):
-            print(f"Username '{name}' already exists in this network. Existing users:")
-            print_users_table(existing_users)
-            name = input("Enter a different WireGuard username: ").strip()
+            if QUIET:
+                # Show only the question again (on stderr)
+                name = prompt_input_with_stderr("Username exists. Enter a different WireGuard username: ")
+            else:
+                print(f"Username '{name}' already exists in this network. Existing users:")
+                print_users_table(existing_users)
+                name = input("Enter a different WireGuard username: ").strip()
             continue
         return name
 
+def print_config_output(conf_text: str):
+    """
+    Ensure the WireGuard config text is printed even in quiet mode.
+    In quiet mode, stdout may be redirected; write to ORIGINAL_STDOUT instead.
+    """
+    if QUIET:
+        try:
+            ORIGINAL_STDOUT.write(conf_text)
+            ORIGINAL_STDOUT.flush()
+        except Exception:
+            # Fallback to stderr if needed
+            sys.stderr.write(conf_text)
+            sys.stderr.flush()
+    else:
+        print(conf_text)
+
 def add_user_flow(username_arg: Optional[str], network_selector: Optional[str], save_arg: Optional[object], force_overwrite: bool):
     cfg, urls, s = get_session_and_urls()
-    print(f"Controller: {urls['BASE']}")
-    print("Logging in...")
+    qprint(f"Controller: {urls['BASE']}")
+    qprint("Logging in...")
     login(s, urls, cfg["username"], cfg["password"])
 
     selected = choose_network_flow(s, cfg, urls, network_selector)
     net_name = selected.get("name") or selected.get("display_name") or selected.get("_id")
     net_id = selected.get("_id")
-    print(f"\nSelected network: {net_name} (id={net_id})")
+    qprint(f"\nSelected network: {net_name} (id={net_id})")
 
     existing_users = list_wireguard_users_v2(s, urls, net_id)
 
+    # Username (ensure uniqueness; in -q prompt on stderr is preserved)
     new_name = prompt_unique_username(existing_users, username_arg)
 
-    print("Determining next available interface IP...")
+    # Next IP
+    qprint("Determining next available interface IP...")
     iface_ip = next_available_interface_ip(selected, existing_users)
-    print(f"Using interface IP: {iface_ip}")
+    qprint(f"Using interface IP: {iface_ip}")
 
-    print("Generating WireGuard keypair...")
+    # Keypair + create
+    qprint("Generating WireGuard keypair...")
     priv_b64, pub_b64 = generate_wg_keypair()
 
-    print(f"Creating user '{new_name}'...")
+    qprint(f"Creating user '{new_name}'...")
     created = create_wireguard_user_v2(s, urls, net_id, new_name, iface_ip, pub_b64)
 
     created_name = created.get("name") or new_name
     created_id = created.get("_id", "")
     created_ip = created.get("interface_ip", iface_ip)
 
-    table = PrettyTable()
-    table.field_names = ["Name", "ID", "IP Address", "Public Key (truncated)"]
-    table.align["Name"] = "l"
-    table.align["ID"] = "l"
-    table.align["IP Address"] = "l"
-    table.align["Public Key (truncated)"] = "l"
-    table.add_row([created_name, created_id, created_ip, pub_b64[:16] + "..."])
-    print("\nUser created")
-    print(table)
+    # Summary (suppressed in -q)
+    if not QUIET:
+        table = PrettyTable()
+        table.field_names = ["Name", "ID", "IP Address", "Public Key (truncated)"]
+        table.align["Name"] = "l"
+        table.align["ID"] = "l"
+        table.align["IP Address"] = "l"
+        table.align["Public Key (truncated)"] = "l"
+        table.add_row([created_name, created_id, created_ip, pub_b64[:16] + "..."])
+        print("\nUser created")
+        print(table)
 
+    # Build config
     conf_text = build_conf(
         selected,
         priv_b64,
@@ -702,11 +748,21 @@ def add_user_flow(username_arg: Optional[str], network_selector: Optional[str], 
         default_dns_ips=cfg["default_dns_ips"],
         additional_allowed_ips=cfg["additional_allowed_ips"],
     )
-    suggested = suggest_conf_filename(net_name, created_name)
-    print(f"\nSuggested filename: {suggested}")
-    print("\nWireGuard configuration (copy/paste):")
-    print(conf_text)
 
+    suggested = suggest_conf_filename(net_name, created_name)
+
+    # Print config and optional save
+    if QUIET:
+        # In quiet mode, only print the configuration if not saving
+        if save_arg is None:
+            print_config_output(conf_text)
+    else:
+        # Normal mode: show filename tip and the config
+        print(f"\nSuggested filename: {suggested}")
+        print("\nWireGuard configuration (copy/paste):")
+        print(conf_text)
+
+    # Save if requested
     out_path = resolve_save_path(
         suggested_filename=suggested,
         save_arg=save_arg,
@@ -797,7 +853,7 @@ def delete_user_flow(usernames: Optional[List[str]], network_selector: Optional[
             print("No users remain on this WireGuard network.")
 
 def main():
-    global VERBOSE, COLORIZE, QUIET
+    global VERBOSE, COLORIZE, QUIET, ORIGINAL_STDOUT
     parser = argparse.ArgumentParser(description="UniFi WireGuard helper")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("-l", "--list", action="store_true",
@@ -814,7 +870,7 @@ def main():
     parser.add_argument("-nc", "--no-color", action="store_true",
                         help="Disable color in verbose output")
     parser.add_argument("-q", "--quiet", action="store_true",
-                        help="Quiet mode: suppress all non-error output (deletion confirmation prompt still shown)")
+                        help="Quiet mode")
     parser.add_argument("-s", "--save", nargs="?", const=True, metavar="PATH",
                         help="Also save the generated config. Without PATH, save to current dir or DefaultWGconfFolder if set. With PATH, save to that exact file or into that directory.")
     parser.add_argument("--force", action="store_true",
@@ -825,13 +881,15 @@ def main():
     COLORIZE = not args.no_color
     QUIET = args.quiet
 
-    # Suppress all stdout when in quiet mode; errors go to stderr and remain visible
+    # Capture original stdout for selective printing under -q
+    ORIGINAL_STDOUT = sys.stdout
+
+    # Suppress stdout in quiet mode. We will explicitly print required outputs to ORIGINAL_STDOUT.
     if QUIET:
         try:
             sys.stdout = open(os.devnull, "w")
         except Exception:
             pass
-        # Also disable verbose just in case
         VERBOSE = False
 
     try:
