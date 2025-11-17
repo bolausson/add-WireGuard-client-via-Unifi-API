@@ -32,6 +32,14 @@ DefaultWGconfFolder = /home/bolausson/wgconfig
 DefaultWGnetworkName = TestServer
 ```
 
+## API enpoints:
+| Action | Endpoint (relative to https://{controller}) | Method | Parameters sent | Notes |
+|---|---|---|---|---|
+| List WireGuard networks | /proxy/network/api/s/{site_id}/rest/networkconf | GET | none | Filter client-side for `vpn_type == "wireguard-server"` |
+| List WireGuard users (clients) | /proxy/network/v2/api/site/{site_id}/wireguard/{network_id}/users | GET | Query: `networkId={network_id}` | Path carries `{network_id}`; UI also sends it as query |
+| Add WireGuard user (batch) | /proxy/network/v2/api/site/{site_id}/wireguard/{network_id}/users/batch | POST | JSON body: `[ { "name": "string", "interface_ip": "A.B.C.D", "public_key": "base64" } ]` | Array payload; controller returns created user(s) |
+| Delete WireGuard user(s) (batch) | /proxy/network/v2/api/site/{site_id}/wireguard/{network_id}/users/batch_delete | POST | JSON body: `[ "user_id_1", "user_id_2", ... ]` | Batch delete by user `_id` values |
+
 ## Examples of managing users:
 
 ### Add a user:
