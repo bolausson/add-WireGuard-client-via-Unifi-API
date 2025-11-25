@@ -259,6 +259,8 @@ def build_urls(gateway: str, site_id: str) -> Dict[str, str]:
         "NETWORKCONF_URL": f"{base}/proxy/network/api/s/{site_id}/rest/networkconf",
         # v2 WireGuard users listing and ops
         "WG_USERS_V2_BASE": f"{base}/proxy/network/v2/api/site/{site_id}/wireguard",
+        # Health info containing WAN IP
+        "HEALTH_URL": f"{base}/proxy/network/api/s/{site_id}/stat/health",
     }
 
 def login(session: requests.Session, urls: Dict[str, str], username: str, password: str):
@@ -311,6 +313,13 @@ def login(session: requests.Session, urls: Dict[str, str], username: str, passwo
                 continue
             # Any non-429: re-raise for global handler
             raise
+
+def get_wan_ip(session: requests.Session, urls: Dict[str, str]) -> str:
+    r = vrequest(session, "GET", urls["HEALTH_URL"])
+    r.raise_for_status()
+    data = r.json()
+    wanip = data.get("data", [])[1]["wan_ip"]
+    return wanip
 
 def list_wireguard_networks(session: requests.Session, urls: Dict[str, str]) -> List[Dict[str, Any]]:
     r = vrequest(session, "GET", urls["NETWORKCONF_URL"])
@@ -496,14 +505,20 @@ def extract_dns_from_network(network_obj: Dict[str, Any]) -> List[str]:
     return dns
 
 def build_conf(network_obj: Dict[str, Any], client_privkey_b64: str, client_interface_ip: str,
-               allowed_ips_mode: str = "subnet",
+               wanip: str, allowed_ips_mode: str = "subnet",
                default_dns_ips: Optional[List[str]] = None,
-               additional_allowed_ips: Optional[List[str]] = None) -> str:
+               additional_allowed_ips: Optional[List[str]] = None,) -> str:
     ipi = ip_from_str(network_obj["ip_subnet"])
     server_pubkey = network_obj.get("wireguard_public_key")
-    endpoint_host = (network_obj.get("vpn_client_configuration_remote_ip_override")
-                     or network_obj.get("wireguard_local_wan_ip")
-                     or "127.0.0.1")
+
+    if network_obj.get("vpn_client_configuration_remote_ip_override"):
+        endpoint_host = network_obj.get("vpn_client_configuration_remote_ip_override")
+    else:
+        if is_ip_addr(network_obj.get("wireguard_local_wan_ip")):
+            endpoint_host = network_obj.get("wireguard_local_wan_ip")
+        else:
+            endpoint_host = wanip
+
     endpoint_port = network_obj.get("local_port", 51820)
 
     # Base AllowedIPs
@@ -701,6 +716,7 @@ def add_user_flow(username_arg: Optional[str], network_selector: Optional[str], 
     qprint("Logging in...")
     login(s, urls, cfg["username"], cfg["password"])
 
+    wanip = get_wan_ip(s, urls)
     selected = choose_network_flow(s, cfg, urls, network_selector)
     net_name = selected.get("name") or selected.get("display_name") or selected.get("_id")
     net_id = selected.get("_id")
@@ -744,6 +760,7 @@ def add_user_flow(username_arg: Optional[str], network_selector: Optional[str], 
         selected,
         priv_b64,
         created_ip,
+        wanip,
         allowed_ips_mode="subnet",
         default_dns_ips=cfg["default_dns_ips"],
         additional_allowed_ips=cfg["additional_allowed_ips"],
